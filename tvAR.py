@@ -757,6 +757,60 @@ class AfdbTvarRunner:
             "abs_max": float(np.max(abs_err)),
         }
 
+    @staticmethod
+    def compute_coef_change_metrics(coefs: np.ndarray) -> Dict[str, float]:
+        """
+        Coefficient stability / regime-change proxy metrics.
+
+        coefs[t, :] = (a1(t), ..., ap(t)) aligned so that coefs[t] predicts x[t].
+
+        We compute Δa(t) = a(t) - a(t-1) only for consecutive valid times,
+        then summarize ||Δa(t)||_2 by mean / q95 / max.
+
+        Returns:
+            n_eval      : number of Δa(t) samples used
+            delta_mean  : mean_t ||Δa(t)||_2
+            delta_q95   : q95_t  ||Δa(t)||_2
+            delta_max   : max_t  ||Δa(t)||_2
+        """
+        coefs = np.asarray(coefs, dtype=np.float64)
+        if coefs.ndim != 2:
+            raise ValueError("coefs must be a 2D array of shape (N, p).")
+
+        valid = np.isfinite(coefs).all(axis=1)
+        idx = np.where(valid)[0]
+
+        if idx.size < 2:
+            return {
+                "n_eval": 0,
+                "delta_mean": float("nan"),
+                "delta_q95": float("nan"),
+                "delta_max": float("nan"),
+            }
+
+        # Use only consecutive time indices so that Δa(t)=a(t)-a(t-1) is well-defined
+        consecutive = (idx[1:] - idx[:-1]) == 1
+        if consecutive.sum() == 0:
+            return {
+                "n_eval": 0,
+                "delta_mean": float("nan"),
+                "delta_q95": float("nan"),
+                "delta_max": float("nan"),
+            }
+
+        idx_prev = idx[:-1][consecutive]
+        idx_curr = idx[1:][consecutive]
+
+        delta = coefs[idx_curr, :] - coefs[idx_prev, :]
+        dnorm = np.linalg.norm(delta, axis=1)
+
+        return {
+            "n_eval": int(dnorm.size),
+            "delta_mean": float(np.mean(dnorm)),
+            "delta_q95": float(np.quantile(dnorm, 0.95)),
+            "delta_max": float(np.max(dnorm)),
+        }
+
     @classmethod
     def multistep_free_run_metrics(
             cls,
@@ -1053,6 +1107,13 @@ class AfdbTvarRunner:
         self._log(f"  |err| q95   : {metrics['abs_q95']:.6e} (s)")
         self._log(f"  |err| q99   : {metrics['abs_q99']:.6e} (s)")
         self._log(f"  |err| max   : {metrics['abs_max']:.6e} (s)")
+
+        coefm = self.compute_coef_change_metrics(coefs)
+        self._log("[Coefficient change metrics for ||Δa(t)||_2]")
+        self._log(f"  n_eval      : {coefm['n_eval']}")
+        self._log(f"  mean        : {coefm['delta_mean']:.6e}")
+        self._log(f"  q95         : {coefm['delta_q95']:.6e}")
+        self._log(f"  max         : {coefm['delta_max']:.6e}")
 
         # Free-run multi-step (these metrics usually differentiate models much better)
         horizons = [1, 10, 30]  # in samples; with dt=1s => 1s, 10s, 30s
